@@ -140,10 +140,12 @@ and 3bc8276); with vkd3d-proton 71cae09, which has them, all six are made.
 What to do on 3.2.0: `VICTORY_PIPELINE_WAIT_MS=0`, which avoids the wait for
 draws (those whose pipeline is not ready are dropped instead), or a
 vkd3d-proton with the dxil-spirv fix beside the executable. Compute dispatches
-still wait for the six once (below): one frame of 10 s at the world's start,
-then 54-60 ms frames (one cold run on 3.2.0). A change that made the
-translation give every loop one latch also made the six build on 3.2.0, but
-it changed the shader cache key for every Wine user and is not in the tree.
+wait for each of the six once (below), at most half a second a frame: in one
+cold start on 3.2.0 with `VICTORY_PIPELINE_WAIT_MS=0` the longest gap between
+frames in the first 300 s was 1.05 s, and the heads had skin. A change that
+made the translation give every loop one latch also made the six build on
+3.2.0, but it changed the shader cache key for every Wine user and is not in
+the tree.
 
 ### Heads without skin (a floating cap, eyes and teeth)
 
@@ -158,19 +160,45 @@ the title issues this one once, so its output is missing for the session. A
 timing race, not a Wine one: the fork's issue #75 saw heads without skin on
 Windows.
 
-Fix, on under Wine (`VICTORY_COMPUTE_WAIT`: `0` off, `1` on any host): a
-compute dispatch whose pipeline is not made yet waits for it, outside the
-frame's 500 ms budget, and its pipeline goes before the requested graphics
-pipelines (after the passes over the screen). The waits are bounded: a frame's
-compute waits end at most 10 s after its first one began, and one pipeline is
-waited for only until a worker has had it for 10 s; past that a dispatch is
-dropped as before (logged once per pipeline). Without the bound, the first
-world frame on a cold cache waited for some 670 compute pipelines one after
-another, 33 s, and the title's own watchdog (about 30 s) ended the run. With
-it, in two cold starts (one on 3.2.0 with `VICTORY_PIPELINE_WAIT_MS=0`, one on
-71cae09), and four more with earlier forms of the bounds, the heads had skin,
-the head map was made within 15 ms of its dispatch, and the title ran on. With
-`VICTORY_COMPUTE_WAIT=0` on this tree the heads had no skin again.
+Fix, on under Wine (`VICTORY_COMPUTE_WAIT`: `0` off, `1` on any host): the
+first dispatch of a compute pipeline not made yet waits for it, outside the
+frame's 500 ms budget, and a worker is kept free to make it next:
+
+- a frame's compute waits end 500 ms after its first one began, however many
+  threads wait;
+- a pipeline has one wait: once a dispatch has waited 100 ms for it in vain,
+  its later dispatches wait as draws do (a pipeline that is never made holds
+  one frame once);
+- compute pipelines go before the requested graphics pipelines (after the
+  passes over the screen), the newest first, and one a dispatch waits for
+  goes before them;
+- the last free worker (of four or more) takes only such a pipeline or a pass
+  over the screen. The head map compiles in 1 to 3 ms; without the kept worker
+  its dispatch waited 0.3 to 1.1 s on a cold start for a worker to come free
+  (once past the 500 ms: no skin), with it the map was made 5 to 191 ms after
+  its dispatch. That narrows the race; it does not close it (the kept worker
+  can itself be busy).
+
+The first form of this held each frame up to 10 s and each pipeline up to 10 s
+of a worker's time: on a cold start every frame that dispatched pipelines not
+made yet was held again (8 and 9 gaps of 1 to 10 s in the first 300 s here; 30
+over 1 s and 11.3 s longest in a tester's run on an RX 7900 XT, issue #386).
+
+Measured here (RX 9070, RADV 26.3.1, vkd3d-proton 71cae09, diagnostics
+builds), cold starts (empty driver, vkd3d-proton, pipeline and translation
+caches; the same checkpoint), the first 300 s after the first frame:
+
+| compute wait | runs | frames/s | longest gap | gaps over 1 s | heads |
+|---|---|---|---|---|---|
+| off (`=0`) | 1 (+1 that crashed at 57 s) | 15.9 | 1.0 s | 1 | no skin |
+| 10 s a frame (before) | 2 | 14.6, 14.5 | 10.2, 10.3 s | 8, 9 | skin |
+| this | 2 (one merged with main 014d52d) | 16.6, 15.3 | 1.1, 1.1 s | 1, 2 | skin |
+
+With a warm cache no compute dispatch waited (0 ms in 300 s; longest gap
+0.96 s). Nine pipelines dispatched in at most three frames never ran with
+this (the same nine with the wait off, none with the 10 s form): their
+output, from the bursts of the first world frames, is lost; what it is for
+is not known.
 
 ## Not known
 
